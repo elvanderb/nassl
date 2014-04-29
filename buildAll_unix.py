@@ -43,7 +43,7 @@ def main():
         'make clean',
         'make']
 
-#    perform_build_task('ZLIB', ZLIB_BUILD_TASKS, ZLIB_DIR)
+    perform_build_task('ZLIB', ZLIB_BUILD_TASKS, ZLIB_DIR)
 
 
     # Build OpenSSL
