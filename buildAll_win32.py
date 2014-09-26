@@ -34,7 +34,7 @@ def main():
         'nmake -f ms\\nt.mak clean',
         'nmake -f ms\\nt.mak',
         'nmake -f ms\\nt.mak install',
-        'xcopy /y %s %s'%(join(OPENSSL_DIR, 'e_os.h'), openssl_internal_dir), # copy some internal headers
+        'xcopy /y %s %s'%(join(OPENSSL_DIR, 'e_os.h'), openssl_internal_dir), # copy some internal headers for accessing EDH and ECDH parameters
         'xcopy /y %s %s'%(join(OPENSSL_DIR, 'ssl', 'ssl_locl.h'), openssl_internal_dir)]
 
     perform_build_task('OPENSSL', OPENSSL_BUILD_TASKS, OPENSSL_DIR)
@@ -60,4 +60,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -1,6 +1,16 @@
 
 #include <Python.h>
 
+// Include internal headers so we can access EDH and ECDH parameter
+// They need to be included before including winsock.h otherwise we get a bunch of errors on Windows
+// http://stackoverflow.com/questions/11726958/cant-include-winsock2-h-in-msvc-2010
+/* crappy solution, ssl_locl and e_os are normally not exported by openssl but we need them to read non exported structures.
+   Plus CERT is defined by ssl_locl so we have to undefine it before including it... */
+#undef CERT
+#include "openssl-internal/ssl_locl.h"
+
+
+
 // Fix symbol clashing on Windows
 // https://bugs.launchpad.net/pyopenssl/+bug/570101
 #ifdef _WIN32
@@ -20,32 +30,31 @@
 #include "openssl_utils.h"
 
 
-
 // nassl.SSL.new()
 static PyObject* nassl_SSL_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
-	nassl_SSL_Object *self;
+    nassl_SSL_Object *self;
     nassl_SSL_CTX_Object *sslCtx_Object;
-	SSL *ssl;
+    SSL *ssl;
 
     self = (nassl_SSL_Object *)type->tp_alloc(type, 0);
     if (self == NULL)
-    	return NULL;
+        return NULL;
 
     self->ssl = NULL;
     self->sslCtx_Object = NULL;
     self->bio_Object = NULL;
 
     // Recover and store the corresponding ssl_ctx
-	if (!PyArg_ParseTuple(args, "O!", &nassl_SSL_CTX_Type, &sslCtx_Object)) {
-		Py_DECREF(self);
-    	return NULL;
+    if (!PyArg_ParseTuple(args, "O!", &nassl_SSL_CTX_Type, &sslCtx_Object)) {
+        Py_DECREF(self);
+        return NULL;
     }
 
-	if (sslCtx_Object == NULL) {
+    if (sslCtx_Object == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "Received a NULL SSL_CTX object");
         Py_DECREF(self);
-		return NULL;
-	}
+        return NULL;
+    }
     Py_INCREF(sslCtx_Object);
 
     ssl = SSL_new(sslCtx_Object->sslCtx);
@@ -54,7 +63,7 @@ static PyObject* nassl_SSL_new(PyTypeObject *type, PyObject *args, PyObject *kwd
         return raise_OpenSSL_error();
     }
 
-	self->sslCtx_Object = sslCtx_Object;
+    self->sslCtx_Object = sslCtx_Object;
     self->ssl = ssl;
     self->bio_Object = NULL;
 
@@ -63,13 +72,13 @@ static PyObject* nassl_SSL_new(PyTypeObject *type, PyObject *args, PyObject *kwd
 
 
 static void nassl_SSL_dealloc(nassl_SSL_Object *self) {
- 	if (self->ssl != NULL) {
-  		SSL_free(self->ssl);
+    if (self->ssl != NULL) {
+        SSL_free(self->ssl);
         self->ssl = NULL;
         if (self->bio_Object != NULL) {
             // BIO is implicitely freed by SSL_free()
             self->bio_Object->bio = NULL;
-  	    }
+        }
     }
 
     if (self->sslCtx_Object != NULL) {
@@ -645,6 +654,152 @@ static PyObject* nassl_SSL_get_ecdh_param(nassl_SSL_Object *self) {
 }
 
 
+static PyObject* nassl_SSL_state_string_long(nassl_SSL_Object *self, PyObject *args) {
+    // This is only used for fixing SSLv2 connections when connecting to IIS7 (like in the 90s)
+    // See SslClient.py for more information
+    const char *stateString = SSL_state_string_long(self->ssl);
+    return PyString_FromString(stateString);
+}
+
+
+static PyObject* nassl_SSL_get_dh_param(nassl_SSL_Object *self) {
+    DH *dh_srvr;
+    SSL_SESSION* session;
+    long alg_k;
+
+    if ((self->ssl == NULL) || (self->ssl->s3 == NULL) || (self->ssl->s3->tmp.new_cipher == NULL))
+    {
+        PyErr_SetString(PyExc_TypeError, "Invalid session (unable to get master key derivation algorithm)");
+        return NULL;
+    }
+    alg_k = self->ssl->s3->tmp.new_cipher->algorithm_mkey;
+    session = self->ssl->session;
+
+    if (!(alg_k & (SSL_kEDH|SSL_kDHr|SSL_kDHd)))
+    {
+        PyErr_SetString(PyExc_TypeError, "Diffie-Hellman is not used in this session");
+        return NULL;
+    }
+
+    if (session == NULL)
+    {
+        PyErr_SetString(PyExc_TypeError, "Invalid session");
+        return NULL;
+    }
+
+    if ((session->sess_cert == NULL) || (session->sess_cert->peer_dh_tmp == NULL))
+    {
+        PyErr_SetString(PyExc_TypeError, "Unable to get Diffie-Hellman parameters");
+        return NULL;
+    }
+    dh_srvr = session->sess_cert->peer_dh_tmp;
+
+    if ((dh_srvr->p == NULL) ||(dh_srvr->g == NULL) ||(dh_srvr->pub_key == NULL))
+    {
+        PyErr_SetString(PyExc_TypeError, "Unable to get Diffie-Hellman parameters");
+        return NULL;
+    }
+
+    return generic_print_to_string((int (*)(BIO *, const void *)) &DHparams_print, dh_srvr);
+}
+
+
+/* mostly ripped from OpenSSL's s3_clnt.c */
+static PyObject* nassl_SSL_get_ecdh_param(nassl_SSL_Object *self) {
+    EC_KEY *ec_key;
+    SSL_SESSION* session;
+    long alg_k;
+    EVP_PKEY *srvr_pub_pkey = NULL;
+
+    if ((self->ssl == NULL) || (self->ssl->s3 == NULL) || (self->ssl->s3->tmp.new_cipher == NULL))
+    {
+        PyErr_SetString(PyExc_TypeError, "Invalid session (unable to get master key derivation algorithm)");
+        return NULL;
+    }
+    alg_k = self->ssl->s3->tmp.new_cipher->algorithm_mkey;
+    session = self->ssl->session;
+
+    if (!(alg_k & (SSL_kECDHr|SSL_kECDHe|SSL_kEECDH)))
+    {
+        PyErr_SetString(PyExc_TypeError, "Elliptic curve Diffie-Hellman is not used in this session");
+        return NULL;
+    }
+
+    if ((session == NULL) || (session->sess_cert == NULL))
+    {
+        PyErr_SetString(PyExc_TypeError, "Invalid session");
+        return NULL;
+    }
+
+
+    if (session->sess_cert->peer_ecdh_tmp != NULL)
+    {
+        ec_key = session->sess_cert->peer_ecdh_tmp;
+    }
+    else
+    {
+        /* Get the Server Public Key from Cert */
+        srvr_pub_pkey = X509_get_pubkey(session-> \
+            sess_cert->peer_pkeys[SSL_PKEY_ECC].x509);
+        if ((srvr_pub_pkey == NULL) ||
+            (srvr_pub_pkey->type != EVP_PKEY_EC) ||
+            (srvr_pub_pkey->pkey.ec == NULL))
+        {
+            if (srvr_pub_pkey)
+                EVP_PKEY_free(srvr_pub_pkey);
+            PyErr_SetString(PyExc_TypeError, "Unable to get server public key.");
+            return NULL;
+        }
+        ec_key = srvr_pub_pkey->pkey.ec;
+    }
+
+    return generic_print_to_string((int (*)(BIO *, const void *)) &ECParameters_print, ec_key);
+}
+
+
+static PyObject* nassl_SSL_get_peer_cert_chain(nassl_SSL_Object *self, PyObject *args) {
+    STACK_OF(X509) *certChain = NULL;
+    PyObject* certChainPyList = NULL;
+    int certChainCount = 0, i = 0;
+
+    // Get the peer's certificate chain
+    certChain = SSL_get_peer_cert_chain(self->ssl); // automatically freed
+    if (certChain == NULL)
+    {
+        PyErr_SetString(PyExc_ValueError, "Error getting the peer's certificate chain.");
+        return NULL;
+    }
+
+    // We'll return a Python list containing each certificate
+    certChainCount = sk_X509_num(certChain);
+    certChainPyList = PyList_New(certChainCount);
+    if (certChainPyList == NULL)
+        return PyErr_NoMemory();
+
+    for (i=0;i<certChainCount;i++)
+    {
+        nassl_X509_Object *x509_Object = NULL;
+
+        // Copy the certificate as the cert chain is freed automatically
+        X509 *cert = X509_dup(sk_X509_value(certChain, i));
+        if (cert == NULL) {
+            PyErr_SetString(PyExc_ValueError, "Could not extract a certificate. Should not happen ?");
+            return NULL;
+        }
+
+        // Store the cert in an _nassl.X509 object
+        x509_Object = (nassl_X509_Object *)nassl_X509_Type.tp_alloc(&nassl_X509_Type, 0);
+        if (x509_Object == NULL)
+            return PyErr_NoMemory();
+        x509_Object->x509 = cert;
+
+        // Add the X509 object to the final list
+        PyList_SET_ITEM(certChainPyList, i,  (PyObject *)x509_Object);
+    }
+
+    return certChainPyList;
+}
+
 
 static PyMethodDef nassl_SSL_Object_methods[] = {
     {"set_bio", (PyCFunction)nassl_SSL_set_bio, METH_VARARGS,
@@ -731,11 +886,17 @@ static PyMethodDef nassl_SSL_Object_methods[] = {
     {"get_tlsext_status_ocsp_resp", (PyCFunction)nassl_SSL_get_tlsext_status_ocsp_resp, METH_NOARGS,
      "OpenSSL's SSL_get_tlsext_status_ocsp_resp(). Returns an _nassl.OCSP_RESPONSE object."
     },
+    {"state_string_long", (PyCFunction)nassl_SSL_state_string_long, METH_NOARGS,
+     "OpenSSL's SSL_state_string_long()."
+    },
     {"get_dh_param", (PyCFunction)nassl_SSL_get_dh_param, METH_NOARGS,
      "return Diffie-Hellman parameters as a string."
     },
     {"get_ecdh_param", (PyCFunction)nassl_SSL_get_ecdh_param, METH_NOARGS,
      "return elliptic curve Diffie-Hellman parameters as a string."
+    },
+    {"get_peer_cert_chain", (PyCFunction)nassl_SSL_get_peer_cert_chain, METH_NOARGS,
+     "OpenSSL's SSL_get_peer_cert_chain(). Returns an array of _nassl.X509 objects."
     },
     {NULL}  // Sentinel
 };
@@ -791,9 +952,9 @@ static PyTypeObject nassl_SSL_Type = {
 
 void module_add_SSL(PyObject* m) {
 
-	nassl_SSL_Type.tp_new = nassl_SSL_new;
-	if (PyType_Ready(&nassl_SSL_Type) < 0)
-    	return;
+    nassl_SSL_Type.tp_new = nassl_SSL_new;
+    if (PyType_Ready(&nassl_SSL_Type) < 0)
+        return;
 
     Py_INCREF(&nassl_SSL_Type);
     PyModule_AddObject(m, "SSL", (PyObject *)&nassl_SSL_Type);

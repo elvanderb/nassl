@@ -34,9 +34,9 @@ Multiple build scripts are available. They will consecutively build Zlib,
 OpenSSL and nassl.
 
 Regardless of the platform you're targeting, you will need to:
-* Download OpenSSL 1.0.1g at
+* Download OpenSSL 1.0.1i at
 https://www.openssl.org/source/ and extract the content of
-the source package to nassl/openssl-1.0.1g
+the source package to nassl/openssl-1.0.1i
 * Download Zlib at http://zlib.net/zlib-1.2.8.tar.gz and extract the content
 of the source package to nassl/zlib-1.2.8.
 
@@ -58,6 +58,12 @@ Build script for Windows 7 64 bits. It expects Python to be installed in
 C:\Python27. This build script will crash after building OpenSSL but you can
 still manage to get a full build of nassl by manually copying the OpenSSL libs
 from openssl/out32 to the right location in build/. Look at win32 builds.
+
+
+Unit Tests
+----------
+
+    python -m unittest discover test -p *Tests.py
 
 
 Why ???
